@@ -1,71 +1,107 @@
-import streamlit as st
-import json
-import os
+import re
 from datetime import datetime, timedelta
 
-DATA_FILE = "words.json"
+import streamlit as st
+from supabase import create_client
+
+# ---------------- CONFIG ----------------
+st.set_page_config(page_title="Flashcards", page_icon="✨", layout="centered")
+
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def load_words():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as file:
-            return json.load(file)
-    return []
+# ---------------- HELPERS ----------------
+def normalize_profile_code(value: str) -> str:
+    value = value.strip().lower()
+    value = re.sub(r"[^a-z0-9_-]", "", value)
+    return value
 
 
-def save_words(words):
-    with open(DATA_FILE, "w", encoding="utf-8") as file:
-        json.dump(words, file, ensure_ascii=False, indent=4)
+def get_profile_id():
+    uid = st.query_params.get("uid", "")
+    if isinstance(uid, list):
+        uid = uid[0] if uid else ""
+    return uid
+
+
+def set_profile_id(uid: str):
+    st.query_params["uid"] = uid
+
+
+def load_words(user_id: str):
+    res = (
+        supabase.table("flashcards_words")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("created_at")
+        .execute()
+    )
+    return res.data if res.data else []
+
+
+def add_word(user_id: str, eng: str, rus: str):
+    supabase.table("flashcards_words").insert({
+        "user_id": user_id,
+        "english": eng.strip(),
+        "russian": rus.strip(),
+        "interval": 1,
+        "next_review": datetime.now().isoformat()
+    }).execute()
+
+
+def update_word(word_id: int, known: bool):
+    res = (
+        supabase.table("flashcards_words")
+        .select("*")
+        .eq("id", word_id)
+        .single()
+        .execute()
+    )
+
+    word = res.data
+    if not word:
+        return
+
+    current_interval = int(word.get("interval", 1))
+    new_interval = current_interval * 2 if known else 1
+    next_review = datetime.now() + timedelta(days=new_interval)
+
+    (
+        supabase.table("flashcards_words")
+        .update({
+            "interval": new_interval,
+            "next_review": next_review.isoformat()
+        })
+        .eq("id", word_id)
+        .execute()
+    )
+
+
+def delete_word(word_id: int):
+    supabase.table("flashcards_words").delete().eq("id", word_id).execute()
 
 
 def get_due_words(words):
     now = datetime.now()
-    due_words = []
-
+    result = []
     for word in words:
         try:
-            review_time = datetime.strptime(word["next_review"], "%Y-%m-%d %H:%M:%S")
+            review_time = datetime.fromisoformat(word["next_review"])
             if review_time <= now:
-                due_words.append(word)
+                result.append(word)
         except Exception:
-            due_words.append(word)
-
-    return due_words
-
-
-def mark_word(words, current_word, known):
-    for word in words:
-        if (
-            word["english"] == current_word["english"]
-            and word["russian"] == current_word["russian"]
-            and word["next_review"] == current_word["next_review"]
-        ):
-            current_interval = int(word.get("interval", 1))
-
-            if known:
-                word["interval"] = max(1, current_interval * 2)
-            else:
-                word["interval"] = 1
-
-            next_review_date = datetime.now() + timedelta(days=word["interval"])
-            word["next_review"] = next_review_date.strftime("%Y-%m-%d %H:%M:%S")
-            break
-
-    save_words(words)
+            result.append(word)
+    return result
 
 
-def delete_word_by_index(words, index):
-    if 0 <= index < len(words):
-        del words[index]
-        save_words(words)
+# ---------------- SESSION ----------------
+if "show_translation" not in st.session_state:
+    st.session_state.show_translation = False
 
 
-st.set_page_config(
-    page_title="Flashcards",
-    page_icon="✨",
-    layout="centered"
-)
-
+# ---------------- STYLES ----------------
 st.markdown("""
 <style>
 html, body, [class*="css"] {
@@ -86,7 +122,6 @@ html, body, [class*="css"] {
     padding-bottom: 2.2rem;
 }
 
-/* Убираем стандартные линии/отступы */
 hr {
     display: none !important;
 }
@@ -94,7 +129,6 @@ hr {
     border: none !important;
 }
 
-/* Верх */
 .hero {
     text-align: center;
     padding: 1.1rem 0 0.9rem 0;
@@ -118,7 +152,6 @@ hr {
     line-height: 1.45;
 }
 
-/* Секции */
 .section-shell {
     background: rgba(255, 255, 255, 0.64);
     backdrop-filter: blur(14px);
@@ -137,7 +170,6 @@ hr {
     letter-spacing: -0.02em;
 }
 
-/* Карточка слова */
 .flashcard-box {
     background: linear-gradient(135deg, #edf8f1 0%, #e8f2ec 100%);
     border-radius: 26px;
@@ -162,7 +194,6 @@ hr {
     line-height: 1.45;
 }
 
-/* Статистика */
 .stat-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -189,7 +220,6 @@ hr {
     letter-spacing: -0.03em;
 }
 
-/* Список слов */
 .word-item {
     background: rgba(255, 255, 255, 0.75);
     border-radius: 18px;
@@ -203,7 +233,14 @@ hr {
     color: #1d1d1f;
 }
 
-/* Поля ввода */
+.profile-box {
+    background: rgba(255, 255, 255, 0.72);
+    border-radius: 22px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+    color: #4d5e54;
+}
+
 .stTextInput > label,
 .stNumberInput > label {
     color: #4a5a51 !important;
@@ -234,7 +271,6 @@ hr {
     padding: 0.78rem 0.95rem !important;
 }
 
-/* Кнопки: база */
 .stFormSubmitButton > button,
 .stButton > button {
     border-radius: 999px !important;
@@ -252,40 +288,37 @@ hr {
     filter: brightness(1.02);
 }
 
-/* Все обычные кнопки — мягко-голубые */
+/* По умолчанию все кнопки мягко-голубые */
 .stFormSubmitButton > button,
 .stButton > button {
     background: linear-gradient(135deg, #d9ebfa 0%, #c7ddf2 100%) !important;
     color: #26445d !important;
 }
 
-/*
-Порядок stButton в приложении:
+/* Порядок кнопок stButton после выбора профиля:
 1 = Показать перевод
 2 = Знаю
 3 = Не знаю
 4 = Удалить выбранное слово
 */
 
-/* Знаю — мягко-зелёная */
+/* Знаю */
 div[data-testid="stButton"]:nth-of-type(2) > button {
     background: linear-gradient(135deg, #dcefdc 0%, #c9e2c9 100%) !important;
     color: #2f5a35 !important;
 }
 
-/* Не знаю — мягко-красная */
+/* Не знаю */
 div[data-testid="stButton"]:nth-of-type(3) > button {
     background: linear-gradient(135deg, #f0d7d7 0%, #e7c6c6 100%) !important;
     color: #6a3535 !important;
 }
 
-/* Уведомления */
 div[data-testid="stAlert"] {
     border-radius: 18px !important;
     border: none !important;
 }
 
-/* Мобильная версия */
 @media (max-width: 768px) {
     .hero-title {
         font-size: 2.35rem;
@@ -297,6 +330,7 @@ div[data-testid="stAlert"] {
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------- HERO ----------------
 st.markdown("""
 <div class="hero">
     <div class="hero-title">Flashcards</div>
@@ -306,10 +340,42 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-words = load_words()
+# ---------------- PROFILE ENTRY ----------------
+user_id = get_profile_id()
+
+if not user_id:
+    st.markdown('<div class="section-shell">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Создай свой профиль</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="profile-box">Придумай свой логин, чтобы входить в свои слова с любого устройства.</div>',
+        unsafe_allow_html=True
+    )
+
+    with st.form("profile_form"):
+        profile_code = st.text_input("Логин")
+        submitted_profile = st.form_submit_button("Продолжить")
+
+        if submitted_profile:
+            profile_code = normalize_profile_code(profile_code)
+            if profile_code:
+                set_profile_id(profile_code)
+                st.rerun()
+            else:
+                st.warning("Введи логин: только английские буквы, цифры, _ или -")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()
+
+# ---------------- PROFILE INFO ----------------
+st.markdown(
+    f'<div class="profile-box"><b>Текущий профиль:</b> {user_id}</div>',
+    unsafe_allow_html=True
+)
+
+words = load_words(user_id)
 due_words = get_due_words(words)
 
-# ---------- ДОБАВЛЕНИЕ ----------
+# ---------------- ADD WORD ----------------
 st.markdown('<div class="section-shell">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">Добавить новое слово</div>', unsafe_allow_html=True)
 
@@ -317,29 +383,16 @@ with st.form("add_word_form", clear_on_submit=True):
     col1, col2 = st.columns(2)
 
     with col1:
-        english = st.text_input(
-            "Английское слово",
-            placeholder="Например: apple"
-        )
+        english = st.text_input("Английское слово", placeholder="Например: apple")
 
     with col2:
-        russian = st.text_input(
-            "Перевод",
-            placeholder="Например: яблоко"
-        )
+        russian = st.text_input("Перевод", placeholder="Например: яблоко")
 
     submitted = st.form_submit_button("Добавить слово")
 
     if submitted:
         if english.strip() and russian.strip():
-            new_word = {
-                "english": english.strip(),
-                "russian": russian.strip(),
-                "interval": 1,
-                "next_review": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            words.append(new_word)
-            save_words(words)
+            add_word(user_id, english, russian)
             st.success(f"Слово «{english.strip()}» добавлено.")
             st.rerun()
         else:
@@ -347,7 +400,7 @@ with st.form("add_word_form", clear_on_submit=True):
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------- КАРТОЧКА ----------
+# ---------------- FLASHCARD ----------------
 st.markdown('<div class="section-shell">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">Карточка для повторения</div>', unsafe_allow_html=True)
 
@@ -361,9 +414,6 @@ if due_words:
     </div>
     """, unsafe_allow_html=True)
 
-    if "show_translation" not in st.session_state:
-        st.session_state.show_translation = False
-
     top_c1, top_c2, top_c3 = st.columns([1, 1.15, 1])
     with top_c2:
         if st.button("Показать перевод", key="show_translation_btn"):
@@ -376,14 +426,14 @@ if due_words:
 
     with c1:
         if st.button("Знаю", key="know_btn"):
-            mark_word(words, current_word, True)
+            update_word(current_word["id"], True)
             st.session_state.show_translation = False
             st.success("Отлично. Интервал увеличен.")
             st.rerun()
 
     with c2:
         if st.button("Не знаю", key="dont_know_btn"):
-            mark_word(words, current_word, False)
+            update_word(current_word["id"], False)
             st.session_state.show_translation = False
             st.warning("Слово отправлено на повторение.")
             st.rerun()
@@ -397,8 +447,8 @@ else:
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------- СТАТИСТИКА ----------
-words = load_words()
+# ---------------- STATS ----------------
+words = load_words(user_id)
 due_words = get_due_words(words)
 
 st.markdown('<div class="section-shell">', unsafe_allow_html=True)
@@ -419,20 +469,22 @@ st.markdown(f"""
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------- СПИСОК СЛОВ ----------
+# ---------------- WORD LIST ----------------
 st.markdown('<div class="section-shell">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">Список слов</div>', unsafe_allow_html=True)
 
 if words:
     for i, word in enumerate(words, start=1):
-        next_review_short = word.get("next_review", "").split(" ")[0] if word.get("next_review") else "—"
+        next_review_display = word.get("next_review", "")
+        if "T" in next_review_display:
+            next_review_display = next_review_display.split("T")[0]
+
         st.markdown(
             f'<div class="word-item"><b>{i}. {word["english"]}</b> — {word["russian"]} | '
-            f'интервал: {word.get("interval", 1)} дн. | следующее повторение: {next_review_short}</div>',
+            f'интервал: {word.get("interval", 1)} дн. | следующее повторение: {next_review_display}</div>',
             unsafe_allow_html=True
         )
 
-    st.write("")
     delete_index = st.number_input(
         "Номер слова для удаления",
         min_value=1,
@@ -441,7 +493,8 @@ if words:
     )
 
     if st.button("Удалить выбранное слово", key="delete_btn"):
-        delete_word_by_index(words, delete_index - 1)
+        word_id = words[delete_index - 1]["id"]
+        delete_word(word_id)
         st.warning("Слово удалено.")
         st.rerun()
 else:
